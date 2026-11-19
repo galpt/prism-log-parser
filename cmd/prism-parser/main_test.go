@@ -127,15 +127,58 @@ func predicted(t *testing.T, logs []string) map[string][2]int {
 	}
 	sizes := map[string][2]int{}
 	for _, f := range figs {
-		sizes[f.Name] = [2]int{f.Width, f.Height}
+		sizes[f.Path] = [2]int{f.Width, f.Height}
 	}
 	return sizes
+}
+
+// tree lists every directory and file under dir, relative to it, with
+// forward slashes and a trailing one on directories.
+func tree(t *testing.T, dir string) []string {
+	t.Helper()
+	var out []string
+	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || p == dir {
+			return err
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if d.IsDir() {
+			rel += "/"
+		}
+		out = append(out, rel)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 func TestRunWritesOneDirectory(t *testing.T) {
 	logs := t.TempDir()
 	one := writeLog(t, logs, "one.log", "20300101-000001", "EEVDF", "sched_a", "sched_b", "sched_c")
 	two := writeLog(t, logs, "two.log", "20300102-000002", "EEVDF", "sched_d", "sched_e", "sched_c")
+	// Both logs have the same scenarios, metrics and verdicts, so they give
+	// the same tree.
+	files := []string{
+		"scenario-heavy/1-avg-fps.png",
+		"scenario-heavy/2-job-wake-p99.png",
+		"scenario-heavy/3-change-vs-eevdf.png",
+		"scenario-paced/1-avg-fps.png",
+		"scenario-paced/2-job-wake-p99.png",
+		"scenario-paced/3-change-vs-eevdf.png",
+		"summary/runs.png",
+		"summary/verdicts-heavy.png",
+	}
+	wantTree := []string{
+		"scenario-heavy/", files[0], files[1], files[2],
+		"scenario-paced/", files[3], files[4], files[5],
+		"summary/", files[6], files[7],
+	}
 	widths := map[int]int{}
 	for _, args := range [][]string{{one}, {one, two}} {
 		t.Run(fmt.Sprint(len(args), " logs"), func(t *testing.T) {
@@ -149,47 +192,58 @@ func TestRunWritesOneDirectory(t *testing.T) {
 				t.Fatalf("%d charts directories, want exactly one: %v", len(dirs), dirs)
 			}
 			dir := dirs[0]
-			names := []string{"prism-scenario-heavy.png", "prism-scenario-paced.png", "prism-summary.png"}
-			want := []string{dir}
-			for _, n := range names {
-				want = append(want, filepath.Join(dir, n))
+			if got := tree(t, dir); !slices.Equal(got, wantTree) {
+				t.Errorf("tree = %q, want %q", got, wantTree)
 			}
-			if got := strings.Fields(stdout); !slices.Equal(got, want) {
+			want := []string{dir}
+			for _, f := range files {
+				want = append(want, filepath.Join(dir, filepath.FromSlash(f)))
+			}
+			if got := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n"); !slices.Equal(got, want) {
 				t.Errorf("stdout = %q, want %q", got, want)
 			}
-			entries, err := os.ReadDir(dir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var files []string
-			for _, e := range entries {
-				files = append(files, e.Name())
-			}
-			if !slices.Equal(files, names) {
-				t.Errorf("files = %q, want %q", files, names)
-			}
 			sizes := predicted(t, args)
-			for _, n := range names {
-				data, err := os.ReadFile(filepath.Join(dir, n))
+			for _, f := range files {
+				data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(f)))
 				if err != nil {
 					t.Fatal(err)
 				}
 				img, err := png.Decode(bytes.NewReader(data))
 				if err != nil {
-					t.Fatalf("%s: %v", n, err)
+					t.Fatalf("%s: %v", f, err)
 				}
 				got := [2]int{img.Bounds().Dx(), img.Bounds().Dy()}
-				if got != sizes[n] {
-					t.Errorf("%s is %v, the layout predicts %v", n, got, sizes[n])
+				layout, ok := sizes[f]
+				if want := [2]int{render.Scale * layout[0], render.Scale * layout[1]}; !ok || got != want {
+					t.Errorf("%s is %v, want %v, twice the layout size %v", f, got, want, layout)
 				}
-				if n == "prism-scenario-heavy.png" {
-					widths[len(args)] = got[0]
+				if f == files[0] {
+					widths[len(args)] = layout[0]
 				}
 			}
 		})
 	}
 	if widths[2] <= widths[1] {
 		t.Errorf("8 columns give width %d, not more than %d for 4", widths[2], widths[1])
+	}
+}
+
+// A figure that fails to render fails the whole write, whichever worker
+// draws it, and the error names it.
+func TestWriteFiguresFails(t *testing.T) {
+	rd, err := render.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rd.Close()
+	dir := t.TempDir()
+	good := func(path string) figure.Figure {
+		return figure.Figure{Path: path, Width: 10, Height: 10, Option: []byte(`{"backgroundColor": "#ffffff"}`)}
+	}
+	bad := figure.Figure{Path: "b/bad.png", Width: 10, Height: 10, Option: []byte(`{"series": [`)}
+	_, err = writeFigures(rd, []figure.Figure{good("a/1.png"), good("a/2.png"), bad, good("c/1.png")}, dir)
+	if err == nil || !strings.Contains(err.Error(), "b/bad.png") {
+		t.Errorf("writeFigures = %v, want an error naming b/bad.png", err)
 	}
 }
 

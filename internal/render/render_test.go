@@ -68,10 +68,11 @@ func decode(t *testing.T, data []byte) image.Image {
 	return img
 }
 
-// dark reports whether a pixel is close to black, which no fill or gridline in
-// testOption is.
+// dark reports whether the pixel at layout position x, y is close to black,
+// which no fill or gridline in testOption is. The image has Scale output
+// pixels per layout px, and the first of them is the one tested.
 func dark(img image.Image, x, y int) bool {
-	r, g, b, _ := img.At(x, y).RGBA()
+	r, g, b, _ := img.At(x*Scale, y*Scale).RGBA()
 	return (r+g+b)/3 < 0x5000
 }
 
@@ -86,8 +87,8 @@ func TestRenderChart(t *testing.T) {
 		t.Fatal(err)
 	}
 	img := decode(t, data)
-	if b := img.Bounds(); b.Dx() != testW || b.Dy() != testH {
-		t.Fatalf("size = %dx%d, want %dx%d", b.Dx(), b.Dy(), testW, testH)
+	if b := img.Bounds(); b.Dx() != Scale*testW || b.Dy() != Scale*testH {
+		t.Fatalf("size = %dx%d, want %dx%d", b.Dx(), b.Dy(), Scale*testW, Scale*testH)
 	}
 
 	titleInk := 0
@@ -135,14 +136,19 @@ func TestRenderIsDeterministic(t *testing.T) {
 }
 
 func TestRenderSeveralSizes(t *testing.T) {
-	for _, size := range [][2]int{{400, 300}, {1024, 600}, {400, 300}} {
+	// The last size is the widest that Render accepts, whose pixmap is at
+	// the wasm limit on that side.
+	for _, size := range [][2]int{{400, 300}, {1024, 600}, {400, 300}, {MaxSide, 2}} {
 		data, err := shared.Render([]byte(testOption), size[0], size[1])
 		if err != nil {
 			t.Fatalf("%dx%d: %v", size[0], size[1], err)
 		}
-		if b := decode(t, data).Bounds(); b.Dx() != size[0] || b.Dy() != size[1] {
-			t.Errorf("size = %dx%d, want %dx%d", b.Dx(), b.Dy(), size[0], size[1])
+		if b := decode(t, data).Bounds(); b.Dx() != Scale*size[0] || b.Dy() != Scale*size[1] {
+			t.Errorf("size = %dx%d, want %dx%d", b.Dx(), b.Dy(), Scale*size[0], Scale*size[1])
 		}
+	}
+	if MaxSide*Scale != maxPixels {
+		t.Errorf("MaxSide %d at scale %d does not reach the pixmap limit %d", MaxSide, Scale, maxPixels)
 	}
 }
 
@@ -160,7 +166,7 @@ func TestRenderErrors(t *testing.T) {
 		{"zero width", testOption, 0, 100, "outside"},
 		{"zero height", testOption, 100, 0, "outside"},
 		{"width too large", testOption, 20000, 100, "outside"},
-		{"height too large", testOption, 100, 16385, "outside"},
+		{"height too large", testOption, 100, MaxSide + 1, "outside"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

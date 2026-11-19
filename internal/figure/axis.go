@@ -11,7 +11,7 @@ import (
 	"github.com/galpt/prism-log-parser/internal/report"
 )
 
-// logRatio is the spread of means above which a panel switches to a log axis.
+// logRatio is the spread of means above which a plot switches to a log axis.
 // Below it a linear axis still shows the smallest bar at a readable height.
 const logRatio = 20
 
@@ -25,7 +25,7 @@ type axisRange struct {
 	min, max, step float64
 }
 
-// useLog reports whether the valid means of a panel call for a log axis. Every
+// useLog reports whether the valid means of a plot call for a log axis. Every
 // mean must be positive, since a log axis has no place for zero, and they must
 // spread over at least logRatio.
 func useLog(cells []report.Cell) bool {
@@ -61,10 +61,10 @@ func whisker(c report.Cell, log bool) (low, high float64) {
 	return low, high
 }
 
-// panelAxis fits an axis to the whiskers of a panel. head is the room in px
+// metricAxis fits an axis to the whiskers of a metric plot. head is the room in px
 // that the value labels need above the highest whisker, out of a plot that is
 // plotH px tall.
-func panelAxis(cells []report.Cell, plotH, head float64) axisRange {
+func metricAxis(cells []report.Cell, plotH, head float64) axisRange {
 	log := useLog(cells)
 	lo, hi := math.Inf(1), math.Inf(-1)
 	for _, c := range cells {

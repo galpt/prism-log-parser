@@ -4,17 +4,21 @@
 // Package figure turns a set of compared PRISM-FRAME logs into ECharts options
 // laid out like the figures of a paper, each with the pixel size it needs.
 //
-// There is one figure per scenario, a grid of small panels with one bar per
-// column, and one summary figure with the run metadata, the montauk verdicts
-// and the notes of every log. The options are built with go-echarts types, and
-// the few things go-echarts cannot express are added in one place (see
-// missing). Every size is worked out here from the content: text is measured
-// with the same font the renderer draws with, so the figure can reserve the
-// space its labels need instead of leaving ECharts to guess and overlap them.
+// Each scenario gets a directory with one image per metric, one bar per
+// column, and an image of the changes against EEVDF. A summary directory holds
+// the run metadata and notes, and one montauk verdict heatmap per scenario.
+// Every image stands on its own with a title, a legend and a caption, so it
+// can be read at its own size and shown without the others. The options are
+// built with go-echarts types, and the few things go-echarts cannot express
+// are added in one place (see missing). Every size is worked out here from the
+// content: text is measured with the same font the renderer draws with, so an
+// image can reserve the space its labels need instead of leaving ECharts to
+// guess and overlap them.
 package figure
 
 import (
 	"fmt"
+	"path"
 	"strconv"
 	"strings"
 
@@ -26,56 +30,68 @@ import (
 // the bold face of the font that the renderer uses.
 type Measure func(text string, sizePx float64, bold bool) float64
 
-// Figure is one image to render. Option is the ECharts option as JSON and
-// Name the file name the image is meant to be saved under.
+// Figure is one image to render, Width by Height in layout px. Option is the
+// ECharts option as JSON. Path is where the image is meant to be saved,
+// relative to the output directory, with forward slashes and exactly one
+// directory in front of the file name.
 type Figure struct {
-	Name          string
+	Path          string
 	Width, Height int
 	Option        []byte
 }
 
-// Build makes the scenario figures, in the order of set.Scenarios, followed by
-// the summary figure. The reports must be the ones set was made from, in the
-// same order. The figures name each report by its Source.
+// summaryDir holds the images that cover the whole run. Every scenario
+// directory starts with "scenario-", so no scenario can take this name.
+const summaryDir = "summary"
+
+// Build makes the images of every scenario, in the order of set.Scenarios,
+// followed by the summary images. The reports must be the ones set was made
+// from, in the same order. The images name each report by its Source.
 func Build(reports []*report.Report, set *compare.Set, m Measure) ([]Figure, error) {
 	colors := map[string]int{}
 	for i, c := range set.Columns() {
 		colors[c.Label] = i
 	}
-	var figs []Figure
-	names := map[string]bool{}
-	add := func(f Figure) error {
-		if names[f.Name] {
-			return fmt.Errorf("two figures are both named %s", f.Name)
-		}
-		names[f.Name] = true
-		figs = append(figs, f)
-		return nil
-	}
+	// Two scenario names can sanitize to the same directory, and the images
+	// of one would then overwrite those of the other.
+	dirs := map[string]string{}
 	for _, t := range set.Scenarios() {
-		f, err := scenarioFigure(t, colors, scenarioCaption(reports, set, t), m)
+		d := scenarioDir(t.Name)
+		if other, ok := dirs[d]; ok {
+			return nil, fmt.Errorf("scenarios %s and %s would both be written to %s", other, t.Name, d)
+		}
+		dirs[d] = t.Name
+	}
+
+	var figs []Figure
+	for _, t := range set.Scenarios() {
+		fs, err := scenarioFigures(t, colors, sourceLines(reports, set, t), m)
 		if err != nil {
 			return nil, fmt.Errorf("scenario %s: %w", t.Name, err)
 		}
-		if err := add(f); err != nil {
-			return nil, err
-		}
+		figs = append(figs, fs...)
 	}
-	f, err := summaryFigure(reports, set, m)
+	f, err := runsFigure(reports, set, m)
 	if err != nil {
 		return nil, fmt.Errorf("summary: %w", err)
 	}
-	if err := add(f); err != nil {
-		return nil, err
+	figs = append(figs, f)
+	summary := set.Summary()
+	for _, t := range set.Scenarios() {
+		f, ok, err := verdictFigure(summary, t.Name, m)
+		if err != nil {
+			return nil, fmt.Errorf("verdicts of %s: %w", t.Name, err)
+		}
+		if ok {
+			figs = append(figs, f)
+		}
 	}
 	return figs, nil
 }
 
-// fileName turns a scenario name into "prism-scenario-<name>.png". The name
-// comes from the log, so anything but letters, digits, '-' and '_' is replaced
-// to keep the file inside the output directory. The "scenario-" part keeps a
-// scenario from ever taking the summary's name, prism-summary.png.
-func fileName(name string) string {
+// sanitize keeps a name that comes from the log inside the output directory:
+// it is lowercased, and anything but letters, digits, '-' and '_' becomes '-'.
+func sanitize(name string) string {
 	var b strings.Builder
 	for _, r := range strings.ToLower(name) {
 		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
@@ -84,37 +100,84 @@ func fileName(name string) string {
 			b.WriteByte('-')
 		}
 	}
-	return "prism-scenario-" + b.String() + ".png"
+	return b.String()
 }
 
-// scenarioCaption explains the encoding of a scenario figure and names the
-// logs its columns come from.
-func scenarioCaption(reports []*report.Report, set *compare.Set, t compare.ScenarioTable) []string {
-	caption := []string{
-		"Bars show the mean and whiskers ±1 sample standard deviation over the ITERATIONS runs of each log. " +
-			"The number above a bar is the mean as the log printed it, and n/a marks a metric that a log has no value for. " +
-			"A whisker that would reach below zero stops at zero, or at the mean on a log scale.",
-	}
-	if len(t.Deltas) > 0 {
-		caption = append(caption, "Change vs EEVDF is the percent change of each mean against the EEVDF column of the same log, "+
-			"so each log is measured against its own baseline and bars from different logs do not share one.")
-	}
-	var sources []string
-	seen := map[int]bool{}
-	for _, c := range t.Columns {
-		if seen[c.Log] {
+// scenarioDir is the directory of a scenario's images.
+func scenarioDir(name string) string { return "scenario-" + sanitize(name) }
+
+// verdictPath is the file of a scenario's verdict heatmap.
+func verdictPath(name string) string { return path.Join(summaryDir, "verdicts-"+sanitize(name)+".png") }
+
+// slug turns a metric label into the readable part of a file name. Letters
+// and digits are kept and lowercased, '%' becomes "pct", and every other run
+// of characters, non-ASCII ones included, becomes a single '-', with none at
+// either end. "1% LOW FPS (p99)" becomes "1pct-low-fps-p99" and "JOB WAKE
+// p99.9" becomes "job-wake-p99-9". A label with nothing left gets "metric",
+// which the number in front of it still keeps apart from any other.
+func slug(label string) string {
+	var b strings.Builder
+	dash := false
+	for _, r := range label {
+		var part string
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			part = string(r)
+		case r >= 'A' && r <= 'Z':
+			part = string(r - 'A' + 'a')
+		case r == '%':
+			part = "pct"
+		default:
+			dash = true
 			continue
 		}
-		seen[c.Log] = true
-		r := reports[c.Log]
-		sources = append(sources, fmt.Sprintf("%s (VERSION %s, COMMIT %s, CPUS %d, ITERATIONS %d)",
-			r.Source, r.Meta.Version, commitText(r.Meta), r.Meta.CPUs, r.Meta.Iterations))
+		if dash && b.Len() > 0 {
+			b.WriteByte('-')
+		}
+		dash = false
+		b.WriteString(part)
 	}
-	caption = append(caption, "Source: "+strings.Join(sources, "; ")+".")
-	for _, d := range set.Differences() {
-		caption = append(caption, "Note: "+d+".")
+	if b.Len() == 0 {
+		return "metric"
 	}
-	return caption
+	return b.String()
+}
+
+// sourceLines are the caption lines of a scenario image that name the logs
+// its columns come from. When the logs agree on the fields that make runs
+// comparable, those are given once. Otherwise each log gets its own, and the
+// lines of Set.Differences follow to say which fields differ.
+func sourceLines(reports []*report.Report, set *compare.Set, t compare.ScenarioTable) []string {
+	var logs []*report.Report
+	seen := map[int]bool{}
+	for _, c := range t.Columns {
+		if !seen[c.Log] {
+			seen[c.Log] = true
+			logs = append(logs, reports[c.Log])
+		}
+	}
+	diffs := set.Differences()
+	if len(diffs) == 0 {
+		names := make([]string, len(logs))
+		for i, r := range logs {
+			names[i] = r.Source
+		}
+		return []string{"Source: " + strings.Join(names, ", ") + " (" + metaText(logs[0].Meta) + ")."}
+	}
+	parts := make([]string, len(logs))
+	for i, r := range logs {
+		parts[i] = r.Source + " (" + metaText(r.Meta) + ")"
+	}
+	lines := []string{"Sources: " + strings.Join(parts, "; ") + "."}
+	for _, d := range diffs {
+		lines = append(lines, "Note: "+d+".")
+	}
+	return lines
+}
+
+// metaText gives the preamble fields that make two runs comparable.
+func metaText(m report.Meta) string {
+	return fmt.Sprintf("VERSION %s, COMMIT %s, CPUS %d, ITERATIONS %d", m.Version, commitText(m), m.CPUs, m.Iterations)
 }
 
 func commitText(m report.Meta) string {

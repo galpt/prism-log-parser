@@ -6,12 +6,14 @@ package figure
 import (
 	"encoding/json"
 	"fmt"
-	"math"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
 	"github.com/galpt/prism-log-parser/internal/compare"
+	"github.com/galpt/prism-log-parser/internal/render"
 	"github.com/galpt/prism-log-parser/internal/report"
 )
 
@@ -118,75 +120,13 @@ type option struct {
 func decode(t *testing.T, f Figure) option {
 	t.Helper()
 	if !json.Valid(f.Option) {
-		t.Fatalf("%s: option is not valid JSON", f.Name)
+		t.Fatalf("%s: option is not valid JSON", f.Path)
 	}
 	var o option
 	if err := json.Unmarshal(f.Option, &o); err != nil {
-		t.Fatalf("%s: %v", f.Name, err)
+		t.Fatalf("%s: %v", f.Path, err)
 	}
 	return o
-}
-
-func panelTitles(o option) []string {
-	var out []string
-	for _, t := range o.Title {
-		if strings.HasPrefix(t.Text, "(") {
-			out = append(out, t.Text)
-		}
-	}
-	return out
-}
-
-func TestBuildNamesAndCounts(t *testing.T) {
-	figs := mustBuild(t, synthetic("a.log", "20300101-000001"))
-	var names []string
-	for _, f := range figs {
-		names = append(names, f.Name)
-	}
-	if got, want := strings.Join(names, " "), "prism-scenario-heavy.png prism-scenario-paced.png prism-summary.png"; got != want {
-		t.Fatalf("names = %s, want %s", got, want)
-	}
-
-	heavy := decode(t, figs[0])
-	// Three metric panels and the delta panel.
-	if len(heavy.Grid) != 4 || len(heavy.YAxis) != 4 {
-		t.Errorf("heavy has %d grids and %d y axes, want 4 and 4", len(heavy.Grid), len(heavy.YAxis))
-	}
-	wantTitles := []string{"(a) AVG FPS ↑", "(b) FRAME TIME p99 (ms) ↓", "(c) JOB WAKE p99 (µs) ↓", "(d) " + deltaName}
-	if got := panelTitles(heavy); strings.Join(got, "|") != strings.Join(wantTitles, "|") {
-		t.Errorf("panel titles = %q, want %q", got, wantTitles)
-	}
-	// Per metric panel: one bar per column, the whiskers and the labels.
-	// The delta panel has one bar series per non-baseline column.
-	if want := 3*(4+2) + 3; len(heavy.Series) != want {
-		t.Errorf("heavy has %d series, want %d", len(heavy.Series), want)
-	}
-
-	paced := decode(t, figs[1])
-	if got := panelTitles(paced); len(got) != 2 || got[1] != "(b) REGIME TICKS LIGHT" {
-		t.Errorf("paced panel titles = %q", got)
-	}
-	if len(paced.Grid) != 2 {
-		t.Errorf("paced has %d grids, want 2 without deltas", len(paced.Grid))
-	}
-	for _, tt := range paced.Title {
-		if strings.Contains(tt.Text, "EEVDF column") {
-			t.Error("paced caption explains deltas it does not have")
-		}
-	}
-}
-
-func TestDeltaPanelOnlyWithDeltas(t *testing.T) {
-	for _, f := range mustBuild(t, synthetic("a.log", "20300101-000001"))[:2] {
-		o := decode(t, f)
-		has := false
-		for _, title := range panelTitles(o) {
-			has = has || strings.HasSuffix(title, deltaName)
-		}
-		if want := f.Name == "prism-scenario-heavy.png"; has != want {
-			t.Errorf("%s: delta panel = %v, want %v", f.Name, has, want)
-		}
-	}
 }
 
 func TestUseLog(t *testing.T) {
@@ -207,42 +147,6 @@ func TestUseLog(t *testing.T) {
 		if got := useLog(c.cells); got != c.want {
 			t.Errorf("%s: useLog = %v, want %v", c.name, got, c.want)
 		}
-	}
-}
-
-// TestLogAxisValuesArePositive checks every value sent to a log axis: bars,
-// both whisker ends and the label points.
-func TestLogAxisValuesArePositive(t *testing.T) {
-	f := mustBuild(t, synthetic("a.log", "20300101-000001"))[0]
-	o := decode(t, f)
-	logAxes := 0
-	for i, a := range o.YAxis {
-		if a.Type != "log" {
-			continue
-		}
-		logAxes++
-		if a.Min <= 0 || a.Max <= a.Min {
-			t.Errorf("log axis %d spans %v..%v", i, a.Min, a.Max)
-		}
-		for _, s := range o.Series {
-			if s.YAxisIndex != i {
-				continue
-			}
-			for _, raw := range s.Data {
-				for _, v := range values(t, raw, s.Type) {
-					if v <= 0 || v < a.Min || v > a.Max {
-						t.Errorf("%s series on log axis %d has value %v outside %v..%v", s.Type, i, v, a.Min, a.Max)
-					}
-				}
-			}
-		}
-	}
-	// Only the wake panel spreads over 20x.
-	if logAxes != 1 {
-		t.Errorf("%d log axes, want 1", logAxes)
-	}
-	if !strings.Contains(string(f.Option), logMark) {
-		t.Error("the log axis has no mark")
 	}
 }
 
@@ -317,15 +221,6 @@ func TestTickText(t *testing.T) {
 	}
 }
 
-func TestPanelLetterAndMetricName(t *testing.T) {
-	if got := panelLetter(0) + panelLetter(25) + panelLetter(26); got != "(a)(z)(aa)" {
-		t.Errorf("letters = %s", got)
-	}
-	if got := metricName(ticks); got != "REGIME TICKS LIGHT" {
-		t.Errorf("unknown direction gives %q", got)
-	}
-}
-
 func TestWrap(t *testing.T) {
 	lines := wrap("one two three four five", measure("one two", 10, false), 10, false, measure)
 	if strings.Join(lines, "|") != "one two|three|four|five" {
@@ -336,37 +231,320 @@ func TestWrap(t *testing.T) {
 	}
 }
 
-// spec is a scenario like the real ones: 13 panels, a delta panel and a
-// legend entry per column.
-func spec(columns int) scenarioSpec {
-	legend := make([]string, columns)
-	for i := range legend {
-		legend[i] = fmt.Sprintf("sched_%d (20300101-000001)", i)
+func paths(figs []Figure) []string {
+	out := make([]string, len(figs))
+	for i, f := range figs {
+		out[i] = f.Path
 	}
-	return scenarioSpec{
-		columns: columns, band: minBand, axisW: 50, titleW: 190, panels: 13,
-		title: "PRISM-FRAME · SCENARIO HEAVY", legend: legend,
-		delta:   &deltaSpec{metrics: 5, columns: columns - 1, slot: 40},
-		caption: []string{strings.Repeat("caption words ", 40)},
+	return out
+}
+
+// byPath returns the figure saved under path.
+func byPath(t *testing.T, figs []Figure, path string) Figure {
+	t.Helper()
+	for _, f := range figs {
+		if f.Path == path {
+			return f
+		}
+	}
+	t.Fatalf("no figure %s in %q", path, paths(figs))
+	return Figure{}
+}
+
+// captionText is the caption of a chart image, which is its last title.
+func captionText(o option) string { return o.Title[len(o.Title)-1].Text }
+
+// withPopulation adds verdicts for AVG FPS in HEAVY and nothing else.
+func withPopulation(r *report.Report) *report.Report {
+	r.Population = []report.Family{{
+		Name: "pandemonium_frame_higher_fps", Key: "fps", Direction: report.HigherIsBetter,
+		Groups: []report.Group{{
+			Labels: map[string]string{"scenario": "heavy"},
+			Pairs: []report.Pair{{A: "sched_b", B: "eevdf", Cliff: 1, Magnitude: "large", P: 0.008},
+				{A: "sched_b", B: "sched_a", Cliff: 0.2, Magnitude: "small", P: 0.5}},
+			Standings: []report.Standing{{Scheduler: "eevdf", Verdict: report.NotBest}, {Scheduler: "sched_a", Verdict: report.Tied}, {Scheduler: "sched_b", Verdict: report.Best}},
+		}},
+	}}
+	return r
+}
+
+func TestBuildPaths(t *testing.T) {
+	figs := mustBuild(t, withPopulation(synthetic("a.log", "20300101-000001")))
+	want := []string{
+		"scenario-heavy/1-avg-fps.png",
+		"scenario-heavy/2-frame-time-p99.png",
+		"scenario-heavy/3-job-wake-p99.png",
+		"scenario-heavy/4-change-vs-eevdf.png",
+		"scenario-paced/1-avg-fps.png",
+		"scenario-paced/2-regime-ticks-light.png",
+		"summary/runs.png",
+		"summary/verdicts-heavy.png",
+	}
+	if got := paths(figs); !slices.Equal(got, want) {
+		t.Errorf("paths = %q, want %q", got, want)
+	}
+	// Without POPULATION there is no verdict image at all.
+	if got := paths(mustBuild(t, synthetic("a.log", "20300101-000001"))); slices.ContainsFunc(got, func(p string) bool {
+		return strings.Contains(p, "verdicts")
+	}) {
+		t.Errorf("paths without population = %q", got)
 	}
 }
 
+func TestSlug(t *testing.T) {
+	cases := map[string]string{
+		"AVG FPS":              "avg-fps",
+		"1% LOW FPS (p99)":     "1pct-low-fps-p99",
+		"0.1% LOW FPS (p99.9)": "0-1pct-low-fps-p99-9",
+		"JOB WAKE p99.9":       "job-wake-p99-9",
+		"LATE FRAMES %":        "late-frames-pct",
+		"  ((x))  ":            "x",
+		"µs only µ":            "s-only",
+		"...":                  "metric",
+		"":                     "metric",
+	}
+	for in, want := range cases {
+		if got := slug(in); got != want {
+			t.Errorf("slug(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestFileNumbering checks the zero padding and that labels with the same
+// slug still get distinct names.
+func TestFileNumbering(t *testing.T) {
+	r := synthetic("a.log", "20300101-000001")
+	sc := &r.Scenarios[1]
+	for i := range 9 {
+		// "LOW (A)" and "LOW A" share a slug.
+		label := "LOW A"
+		if i%2 == 0 {
+			label = "LOW (A)"
+		}
+		sc.Rows = append(sc.Rows, row(report.Metric{Label: label, Unit: fmt.Sprint(i)}, cell(1, 0), cell(2, 0), cell(3, 0), cell(4, 0)))
+	}
+	var names []string
+	seen := map[string]bool{}
+	for _, f := range mustBuild(t, r) {
+		if dir, name, _ := strings.Cut(f.Path, "/"); dir == "scenario-paced" {
+			names = append(names, name)
+			if seen[name] {
+				t.Errorf("%s is used twice", name)
+			}
+			seen[name] = true
+		}
+	}
+	if len(names) != 11 || names[0] != "01-avg-fps.png" || names[2] != "03-low-a.png" || names[10] != "11-low-a.png" {
+		t.Errorf("names = %q", names)
+	}
+	if !slices.IsSorted(names) {
+		t.Errorf("names do not sort in table order: %q", names)
+	}
+}
+
+func TestScenarioDirectories(t *testing.T) {
+	if got := scenarioDir("EACH_CONTENDED"); got != "scenario-each_contended" {
+		t.Errorf("scenarioDir = %s", got)
+	}
+	if got := scenarioDir("../X"); got != "scenario----x" {
+		t.Errorf("scenarioDir = %s", got)
+	}
+	if got := scenarioDir("summary"); got == summaryDir {
+		t.Errorf("scenario SUMMARY takes the directory %s", got)
+	}
+	r := synthetic("a.log", "20300101-000001")
+	r.Scenarios[1].Name = "HE/AVY"
+	r.Scenarios[0].Name = "HE AVY"
+	if _, err := Build([]*report.Report{r}, mustSet(t, r), measure); err == nil || !strings.Contains(err.Error(), "scenario-he-avy") {
+		t.Errorf("two scenarios in one directory give %v", err)
+	}
+}
+
+func TestMetricImages(t *testing.T) {
+	figs := mustBuild(t, synthetic("a.log", "20300101-000001"))
+	for _, f := range figs {
+		if !strings.HasPrefix(f.Path, "scenario-") {
+			continue
+		}
+		o := decode(t, f)
+		if len(o.Grid) != 1 || len(o.YAxis) != 1 {
+			t.Errorf("%s has %d grids and %d y axes, want one plot", f.Path, len(o.Grid), len(o.YAxis))
+		}
+		if strings.HasSuffix(f.Path, deltaFile+".png") {
+			continue
+		}
+		// One bar per column, the whiskers and the labels.
+		if len(o.Series) != 4+2 {
+			t.Errorf("%s has %d series, want 6", f.Path, len(o.Series))
+		}
+		legend := 0
+		for _, l := range o.Legend {
+			legend += len(l.Data)
+		}
+		if legend != 4 {
+			t.Errorf("%s has %d legend entries, want 4", f.Path, legend)
+		}
+	}
+	titles := []string{}
+	for _, p := range []string{"scenario-heavy/1-avg-fps.png", "scenario-heavy/2-frame-time-p99.png", "scenario-heavy/3-job-wake-p99.png", "scenario-paced/2-regime-ticks-light.png"} {
+		titles = append(titles, decode(t, byPath(t, figs, p)).Title[0].Text)
+	}
+	want := []string{"HEAVY · AVG FPS ↑", "HEAVY · FRAME TIME p99 (ms) ↓", "HEAVY · JOB WAKE p99 (µs) ↓", "PACED · REGIME TICKS LIGHT"}
+	if !slices.Equal(titles, want) {
+		t.Errorf("titles = %q, want %q", titles, want)
+	}
+}
+
+func TestDeltaImage(t *testing.T) {
+	figs := mustBuild(t, synthetic("a.log", "20300101-000001"))
+	o := decode(t, byPath(t, figs, "scenario-heavy/4-change-vs-eevdf.png"))
+	// One bar series per non-baseline column, and EEVDF has no deltas.
+	var names []string
+	for _, s := range o.Series {
+		if s.Type != "bar" || len(s.Data) != 2 {
+			t.Errorf("delta series %s is %s with %d items", s.Name, s.Type, len(s.Data))
+		}
+		names = append(names, s.Name)
+	}
+	if !slices.Equal(names, []string{"sched_a", "sched_b", "sched_c"}) {
+		t.Errorf("delta series = %q", names)
+	}
+	if o.Title[0].Text != "HEAVY · "+deltaName || !strings.Contains(captionText(o), "its own EEVDF") {
+		t.Errorf("delta title %q, caption %q", o.Title[0].Text, captionText(o))
+	}
+
+	// A scenario whose deltas are all invalid has nothing to draw.
+	r := synthetic("a.log", "20300101-000001")
+	r.Scenarios[1].Deltas = []report.Delta{{Metric: fps, Cells: make([]report.DeltaCell, 4)}}
+	for _, p := range paths(mustBuild(t, r)) {
+		if strings.HasPrefix(p, "scenario-paced/") && strings.Contains(p, deltaFile) {
+			t.Errorf("invalid deltas give %s", p)
+		}
+	}
+}
+
+func TestCaptions(t *testing.T) {
+	figs := mustBuild(t, synthetic("a.log", "20300101-000001"))
+	cases := []struct {
+		path        string
+		clamp, na   bool
+		clampString string
+	}{
+		{"scenario-heavy/1-avg-fps.png", false, true, ""},
+		{"scenario-heavy/2-frame-time-p99.png", false, false, ""},
+		{"scenario-heavy/3-job-wake-p99.png", true, false, clampLog},
+		{"scenario-paced/2-regime-ticks-light.png", false, false, ""},
+	}
+	for _, c := range cases {
+		text := captionText(decode(t, byPath(t, figs, c.path)))
+		flat := strings.ReplaceAll(text, "\n", " ")
+		if !strings.Contains(flat, "±1 sample standard deviation") || !strings.Contains(flat, "Source: /some/dir/a.log (VERSION 1.2.3, COMMIT abc1234, CPUS 8, ITERATIONS 5).") {
+			t.Errorf("%s caption lacks the encoding or the source: %q", c.path, flat)
+		}
+		if got := strings.Contains(flat, "stops at"); got != c.clamp {
+			t.Errorf("%s: clamp sentence = %v, want %v", c.path, got, c.clamp)
+		}
+		if c.clamp && !strings.Contains(flat, c.clampString) {
+			t.Errorf("%s caption lacks %q", c.path, c.clampString)
+		}
+		if got := strings.Contains(flat, naCaption); got != c.na {
+			t.Errorf("%s: n/a sentence = %v, want %v", c.path, got, c.na)
+		}
+	}
+
+	// A linear axis clamps at zero.
+	r := synthetic("a.log", "20300101-000001")
+	r.Scenarios[1].Rows[1].Cells[2] = cell(5, 9)
+	text := strings.ReplaceAll(captionText(decode(t, byPath(t, mustBuild(t, r), "scenario-paced/2-regime-ticks-light.png"))), "\n", " ")
+	if !strings.Contains(text, clampLinear) {
+		t.Errorf("linear clamp caption = %q", text)
+	}
+
+	// Logs that differ get a source each and the difference lines.
+	other := synthetic("b.log", "20300101-000002")
+	other.Meta.CPUs = 16
+	text = strings.ReplaceAll(captionText(decode(t, mustBuild(t, synthetic("a.log", "20300101-000001"), other)[0])), "\n", " ")
+	for _, want := range []string{"Sources: /some/dir/a.log (VERSION 1.2.3, COMMIT abc1234, CPUS 8, ITERATIONS 5); /some/dir/b.log (", "Note: CPUS differs: 8 (/some/dir/a.log), 16 (/some/dir/b.log)."} {
+		if !strings.Contains(text, want) {
+			t.Errorf("caption %q lacks %q", text, want)
+		}
+	}
+}
+
+// TestLogAxisValuesArePositive checks every value sent to a log axis: bars,
+// both whisker ends and the label points.
+func TestLogAxisValuesArePositive(t *testing.T) {
+	logAxes := 0
+	for _, f := range mustBuild(t, synthetic("a.log", "20300101-000001")) {
+		o := decode(t, f)
+		for i, a := range o.YAxis {
+			if a.Type != "log" {
+				continue
+			}
+			logAxes++
+			if a.Min <= 0 || a.Max <= a.Min {
+				t.Errorf("%s: log axis spans %v..%v", f.Path, a.Min, a.Max)
+			}
+			for _, s := range o.Series {
+				if s.YAxisIndex != i {
+					continue
+				}
+				for _, raw := range s.Data {
+					for _, v := range values(t, raw, s.Type) {
+						if v <= 0 || v < a.Min || v > a.Max {
+							t.Errorf("%s: %s series has value %v outside %v..%v", f.Path, s.Type, v, a.Min, a.Max)
+						}
+					}
+				}
+			}
+			if !strings.Contains(string(f.Option), logMark) {
+				t.Errorf("%s: the log axis has no mark", f.Path)
+			}
+		}
+	}
+	// Only the wake metric spreads over 20x.
+	if logAxes != 1 {
+		t.Errorf("%d log axes, want 1", logAxes)
+	}
+}
+
+// spec is a metric image like the real ones, with a legend entry per column.
+func spec(columns int) chartSpec {
+	legend := make([]string, columns)
+	for i := range legend {
+		legend[i] = fmt.Sprintf("sched_%d", i)
+	}
+	return chartSpec{
+		minPlotW: float64(columns * minBand), axisW: 50, footH: plotFoot,
+		titleW: measure("HEAVY · FRAME TIME p99 (ms) ↓", titleSize, true), legend: legend,
+		caption: []string{encodingText, "Source: a.log (VERSION 1.2.3, COMMIT abc1234, CPUS 8, ITERATIONS 5)."},
+	}
+}
+
+// TestLayoutWidthGrowsWithColumns checks that the width grows strictly from
+// 4 to 60 columns. Up to 3 columns minWidth sets it instead.
 func TestLayoutWidthGrowsWithColumns(t *testing.T) {
 	prev := 0
 	widths := map[int]int{}
-	for c := 2; c <= 16; c++ {
-		l, err := layoutScenario(spec(c), measure)
+	for c := 1; c <= 60; c++ {
+		l, err := layoutChart(spec(c), measure)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if l.width <= prev {
+		widths[c] = l.width
+		if c <= 3 && l.width != minWidth {
+			t.Errorf("%d columns give width %d, want minWidth %d", c, l.width, minWidth)
+		}
+		if c >= 4 && l.width <= prev {
 			t.Errorf("%d columns give width %d, not more than %d", c, l.width, prev)
 		}
+		if want := 2*margin + 50 + c*minBand; c >= 4 && l.width != want {
+			t.Errorf("%d columns give width %d, want %d", c, l.width, want)
+		}
 		prev = l.width
-		widths[c] = l.width
 	}
-	if w := widths[4]; w < 1400 || w > 1800 {
-		t.Errorf("4 columns give width %d, want about 1600", w)
+	if w := widths[4]; w < 600 || w > 800 {
+		t.Errorf("4 columns give width %d, want 600 to 800", w)
 	}
 	if widths[8] < widths[4]*3/2 {
 		t.Errorf("8 columns give width %d, not much more than %d for 4", widths[8], widths[4])
@@ -374,53 +552,42 @@ func TestLayoutWidthGrowsWithColumns(t *testing.T) {
 }
 
 func TestLayoutHeightGrows(t *testing.T) {
-	base, err := layoutScenario(spec(4), measure)
+	base, err := layoutChart(spec(4), measure)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(base.legendRows) != 1 {
+		t.Errorf("4 columns take %d legend rows, want 1", len(base.legendRows))
 	}
 	more := spec(4)
-	more.panels = 17
-	more.caption = append(more.caption, "another caption line")
-	taller, err := layoutScenario(more, measure)
+	more.caption = append(more.caption, "Note: CPUS differs.")
+	taller, err := layoutChart(more, measure)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if taller.height <= base.height {
-		t.Errorf("more panels and caption give height %d, not more than %d", taller.height, base.height)
-	}
-	if base.perRow != maxPerRow || len(base.legendRows) != 1 {
-		t.Errorf("4 columns give %d panels per row and %d legend rows", base.perRow, len(base.legendRows))
+	if got, want := taller.height-base.height, int(lineHeight(captionSize)); got != want {
+		t.Errorf("one more caption line adds %d px, want %d", got, want)
 	}
 	crowded := spec(4)
-	crowded.legend = spec(30).legend
-	wide, err := layoutScenario(crowded, measure)
+	for i := range 12 {
+		crowded.legend = append(crowded.legend, fmt.Sprintf("sched_%d (20300101-000001)", i))
+	}
+	wide, err := layoutChart(crowded, measure)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(wide.legendRows) < 2 || wide.height <= base.height {
-		t.Errorf("30 legend entries take %d rows and height %d", len(wide.legendRows), wide.height)
+	if len(wide.legendRows) < 2 || wide.height != base.height+(len(wide.legendRows)-1)*legendRowH {
+		t.Errorf("16 legend entries take %d rows and height %d, from %d", len(wide.legendRows), wide.height, base.height)
 	}
-}
-
-func TestLayoutDropsPanelsPerRow(t *testing.T) {
-	s := spec(60)
-	s.delta = nil
-	l, err := layoutScenario(s, measure)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if l.perRow >= maxPerRow || l.width > maxSide {
-		t.Errorf("60 columns give %d panels per row and width %d", l.perRow, l.width)
-	}
-	if want := 2*margin + float64(l.perRow)*l.cellW - panelGapH; math.Abs(float64(l.width)-want) > 1 {
-		t.Errorf("width %d, want %v", l.width, want)
+	if wide.plotTop <= base.plotTop || wide.captionTop-wide.plotTop != base.captionTop-base.plotTop {
+		t.Errorf("legend rows move the plot from %v to %v", base.plotTop, wide.plotTop)
 	}
 }
 
 func TestLayoutTooWide(t *testing.T) {
-	_, err := layoutScenario(spec(300), measure)
-	if err == nil || !strings.Contains(err.Error(), "16384") {
-		t.Errorf("300 columns give %v, want an error naming the limit", err)
+	_, err := layoutChart(spec(100), measure)
+	if err == nil || !strings.Contains(err.Error(), strconv.Itoa(render.MaxSide)) {
+		t.Errorf("100 columns give %v, want an error naming the limit", err)
 	}
 }
 
@@ -429,11 +596,10 @@ func TestManyColumnsGetPatterns(t *testing.T) {
 	for i := range 4 {
 		reports = append(reports, synthetic(fmt.Sprintf("%d.log", i), fmt.Sprintf("2030010%d-000001", i+1)))
 	}
-	figs := mustBuild(t, reports...)
-	o := decode(t, figs[0])
+	o := decode(t, mustBuild(t, reports...)[0])
 	seen := map[string]bool{}
 	for _, s := range o.Series {
-		if s.Type != "bar" || s.YAxisIndex != 0 {
+		if s.Type != "bar" {
 			continue
 		}
 		d, _ := json.Marshal(s.ItemStyle.Decal)
@@ -444,33 +610,23 @@ func TestManyColumnsGetPatterns(t *testing.T) {
 		seen[key] = true
 	}
 	if len(seen) != 16 {
-		t.Errorf("%d distinct bar styles in the first panel, want 16", len(seen))
+		t.Errorf("%d distinct bar styles, want 16", len(seen))
 	}
 	legend := 0
 	for _, l := range o.Legend {
 		legend += len(l.Data)
 	}
-	if legend != 16 {
-		t.Errorf("legend has %d entries, want 16", legend)
+	if legend != 16 || len(o.Legend) < 2 {
+		t.Errorf("legend has %d entries in %d rows, want 16 in several", legend, len(o.Legend))
 	}
 }
 
 func TestSummary(t *testing.T) {
-	r := synthetic("a.log", "20300101-000001")
-	r.Population = []report.Family{{
-		Name: "pandemonium_frame_higher_fps", Key: "fps", Direction: report.HigherIsBetter,
-		Groups: []report.Group{{
-			Labels: map[string]string{"scenario": "heavy"},
-			Pairs: []report.Pair{{A: "sched_b", B: "eevdf", Cliff: 1, Magnitude: "large", P: 0.008},
-				{A: "sched_b", B: "sched_a", Cliff: 0.2, Magnitude: "small", P: 0.5}},
-			Standings: []report.Standing{{Scheduler: "eevdf", Verdict: report.NotBest}, {Scheduler: "sched_a", Verdict: report.Tied}, {Scheduler: "sched_b", Verdict: report.Best}},
-		}},
-	}}
 	other := synthetic("b.log", "20300101-000002")
 	other.Notes = []string{"the audio thread ran late"}
-	figs := mustBuild(t, r, other)
-	f := figs[len(figs)-1]
-	o := decode(t, f)
+	figs := mustBuild(t, withPopulation(synthetic("a.log", "20300101-000001")), other)
+	v := byPath(t, figs, "summary/verdicts-heavy.png")
+	o := decode(t, v)
 	var heat []string
 	for _, s := range o.Series {
 		if s.Type == "heatmap" {
@@ -482,41 +638,31 @@ func TestSummary(t *testing.T) {
 	if got := strings.Join(heat, " "); got != "best:1 tied:1 not best:1 no verdict:5" {
 		t.Errorf("heatmap series = %s", got)
 	}
-	text := string(f.Option)
-	for _, want := range []string{"AVG FPS ↑ · HEAVY", `d=+1.00 large\np=0.008`, "b.log: AUDIO: the audio thread ran late",
-		"b.log has no POPULATION data", "abc1234", "+0.1%", "1000.500"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("summary option lacks %q", want)
+	for _, want := range []string{"HEAVY · MCB verdicts (montauk)", `d=+1.00 large\np=0.008`, "AVG FPS ↑", "multiple comparisons with the best"} {
+		if !strings.Contains(string(v.Option), want) {
+			t.Errorf("verdict option lacks %q", want)
 		}
 	}
 
-	o = decode(t, mustBuild(t, synthetic("a.log", "20300101-000001"))[2])
-	found := false
-	for _, tt := range o.Title {
-		found = found || strings.Contains(tt.Text, "No log has POPULATION data")
+	runs := string(byPath(t, figs, "summary/runs.png").Option)
+	for _, want := range []string{"b.log: AUDIO: the audio thread ran late", "b.log has no POPULATION data", "abc1234", "+0.1%", "1000.500"} {
+		if !strings.Contains(runs, want) {
+			t.Errorf("runs option lacks %q", want)
+		}
 	}
-	if !found {
-		t.Error("summary without population does not say so")
-	}
-}
 
-func TestFileName(t *testing.T) {
-	if got := fileName("EACH_CONTENDED"); got != "prism-scenario-each_contended.png" {
-		t.Errorf("fileName = %s", got)
-	}
-	if got := fileName("../X"); got != "prism-scenario----x.png" {
-		t.Errorf("fileName = %s", got)
-	}
-	if got := fileName("summary"); got == "prism-summary.png" {
-		t.Errorf("scenario SUMMARY takes the summary's file name %s", got)
+	runs = string(byPath(t, mustBuild(t, synthetic("a.log", "20300101-000001")), "summary/runs.png").Option)
+	if !strings.Contains(runs, "No log has POPULATION data") {
+		t.Error("runs without population does not say so")
 	}
 }
 
 func TestEmptyScenario(t *testing.T) {
 	r := synthetic("a.log", "20300101-000001")
 	r.Scenarios = append(r.Scenarios, report.Scenario{Name: "EMPTY", Schedulers: r.Scenarios[0].Schedulers})
-	figs := mustBuild(t, r)
-	if f := figs[2]; f.Name != "prism-scenario-empty.png" || len(decode(t, f).Grid) != 0 {
-		t.Errorf("empty scenario gives %s with option %s", f.Name, f.Option)
+	for _, p := range paths(mustBuild(t, r)) {
+		if strings.Contains(p, "empty") {
+			t.Errorf("a scenario without rows gives %s", p)
+		}
 	}
 }

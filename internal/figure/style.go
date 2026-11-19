@@ -23,15 +23,19 @@ const (
 	noneCell = "#f0f0f0"
 )
 
-// Font sizes in px. They are shared by the layout and the option so that the
-// space reserved for a piece of text is measured at the size it is drawn at.
+// Font sizes in layout px. They are shared by the layout and the option so
+// that the space reserved for a piece of text is measured at the size it is
+// drawn at. Each image is meant to be read at its own size, so the sizes are
+// chosen to read comfortably on a screen at 100%.
 const (
-	figureTitleSize = 20
-	headingSize     = 15
-	panelTitleSize  = 14
-	legendSize      = 13
-	bodySize        = 12
-	valueSize       = 11
+	titleSize   = 20
+	headingSize = 17
+	legendSize  = 15
+	tickSize    = 14
+	valueSize   = 14
+	bodySize    = 14
+	cellSize    = 13
+	captionSize = 13
 )
 
 // palette is Okabe and Ito's color-blind-safe set without its black, which
@@ -85,16 +89,6 @@ func metricName(m report.Metric) string {
 		s += " ↓"
 	}
 	return s
-}
-
-// panelLetter returns "(a)" for 0, "(z)" for 25 and "(aa)" for 26, like the
-// column names of a spreadsheet.
-func panelLetter(i int) string {
-	var b []byte
-	for i++; i > 0; i = (i - 1) / 26 {
-		b = append([]byte{byte('a' + (i-1)%26)}, b...)
-	}
-	return "(" + string(b) + ")"
 }
 
 // lineHeight is the advance between two lines of text at a font size.

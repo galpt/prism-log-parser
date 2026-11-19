@@ -16,11 +16,13 @@ import (
 // map that go-echarts builds.
 //
 // BaseConfiguration holds a single title and a single legend while ECharts
-// takes a list of each, which is how every panel gets its own title and how a
+// takes a list of each, which is how an image gets several titles and how a
 // legend is split into rows that never wrap on their own. There is no global
 // textStyle, no graphic component, no decal on opts.ItemStyle (and the decal
-// list of opts.AriaDecal has the wrong element type), and opts.YAxis has no
-// axisTick, which ECharts hides by default on a value axis.
+// list of opts.AriaDecal has the wrong element type), opts.YAxis has no
+// axisTick, which ECharts hides by default on a value axis, and the line
+// height of an x axis label is a string, which ECharts does not read as a
+// size.
 type missing struct {
 	titles  []opts.Title
 	legends []opts.Legend
@@ -29,6 +31,9 @@ type missing struct {
 	decals map[int]*decal
 	// yTick is given to every y axis.
 	yTick opts.AxisTick
+	// xLineHeight, when set, is the line height of the x axis labels, which
+	// the labels of several lines need to keep their lines apart.
+	xLineHeight float64
 }
 
 // graphic is one line of the ECharts graphic component, placed in px.
@@ -64,6 +69,16 @@ type decoratedSeries struct {
 type decoratedStyle struct {
 	opts.ItemStyle
 	Decal *decal `json:"decal"`
+}
+
+type spacedXAxis struct {
+	opts.XAxis
+	AxisLabel spacedLabel `json:"axisLabel"`
+}
+
+type spacedLabel struct {
+	*opts.AxisLabel
+	LineHeight float64 `json:"lineHeight"`
 }
 
 type tickedYAxis struct {
@@ -112,6 +127,18 @@ func (m missing) apply(c chart) ([]byte, error) {
 		ticked[i] = tickedYAxis{YAxis: a, AxisTick: m.yTick}
 	}
 	option["yAxis"] = ticked
+
+	if m.xLineHeight > 0 {
+		xs, ok := option["xAxis"].([]opts.XAxis)
+		if !ok {
+			return nil, fmt.Errorf("go-echarts x axes have type %T", option["xAxis"])
+		}
+		spaced := make([]spacedXAxis, len(xs))
+		for i, a := range xs {
+			spaced[i] = spacedXAxis{XAxis: a, AxisLabel: spacedLabel{AxisLabel: a.AxisLabel, LineHeight: m.xLineHeight}}
+		}
+		option["xAxis"] = spaced
+	}
 	return json.Marshal(option)
 }
 

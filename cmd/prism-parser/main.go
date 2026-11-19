@@ -3,9 +3,9 @@
 
 // Command prism-parser turns PANDEMONIUM PRISM-FRAME logs into PNG charts.
 //
-// It writes one image per scenario and one summary image into a new
-// charts-<timestamp> directory under the current one. Several logs are drawn
-// side by side in the same images.
+// It writes a new charts-<timestamp> directory under the current one, with a
+// directory of images for every scenario, one image per metric, and a
+// summary directory. Several logs are drawn side by side in the same images.
 package main
 
 import (
@@ -15,6 +15,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/galpt/prism-log-parser/internal/compare"
@@ -110,19 +113,96 @@ func generate(paths []string, stdout io.Writer) error {
 	return nil
 }
 
-// writeFigures renders every figure into dir and returns the paths written.
+// renderWorkers bounds the number of Renderers that draw at once. A run has
+// dozens of images and each Renderer is single threaded, so three of them
+// in parallel cut the wall time of two logs by more than half. Each one holds
+// its own JavaScript runtime and wasm memory, about 110 MB at the image sizes
+// here, so a fourth adds more memory than the time it saves is worth.
+const renderWorkers = 3
+
+// writeFigures renders every figure into dir and returns the paths written,
+// in the order of figs. The directories are created first, in order, so that
+// the workers only ever write files. rd is used as one of the workers, and
+// the others are created here and closed again before it returns.
 func writeFigures(rd *render.Renderer, figs []figure.Figure, dir string) ([]string, error) {
-	var written []string
-	for _, f := range figs {
-		png, err := rd.Render(f.Option, f.Width, f.Height)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", f.Name, err)
+	paths := make([]string, len(figs))
+	made := map[string]bool{}
+	for i, f := range figs {
+		paths[i] = filepath.Join(dir, filepath.FromSlash(f.Path))
+		if sub := filepath.Dir(paths[i]); !made[sub] {
+			if err := os.Mkdir(sub, 0o755); err != nil {
+				return nil, err
+			}
+			made[sub] = true
 		}
-		path := filepath.Join(dir, f.Name)
-		if err := os.WriteFile(path, png, 0o644); err != nil {
-			return nil, err
-		}
-		written = append(written, path)
 	}
-	return written, nil
+
+	workers, err := extraRenderers(min(renderWorkers, runtime.GOMAXPROCS(0), len(figs)) - 1)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		for _, w := range workers {
+			_ = w.Close()
+		}
+	}()
+	workers = append(workers, rd)
+
+	jobs := make(chan int)
+	errs := make([]error, len(figs))
+	var failed atomic.Bool
+	var wg sync.WaitGroup
+	for _, w := range workers {
+		wg.Go(func() {
+			for i := range jobs {
+				if errs[i] = writeFigure(w, figs[i], paths[i]); errs[i] != nil {
+					failed.Store(true)
+				}
+			}
+		})
+	}
+	// After the first failure the run is lost anyway, so no new image is
+	// started.
+	for i := range figs {
+		if failed.Load() {
+			break
+		}
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		return nil, err
+	}
+	return paths, nil
+}
+
+// extraRenderers creates n Renderers at the same time. The wasm module was
+// compiled by the first Renderer, so what is left for each is loading
+// ECharts and instantiating the module, which run well in parallel.
+func extraRenderers(n int) ([]*render.Renderer, error) {
+	rds := make([]*render.Renderer, max(n, 0))
+	errs := make([]error, len(rds))
+	var wg sync.WaitGroup
+	for i := range rds {
+		wg.Go(func() { rds[i], errs[i] = render.New() })
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		for _, rd := range rds {
+			if rd != nil {
+				_ = rd.Close()
+			}
+		}
+		return nil, err
+	}
+	return rds, nil
+}
+
+func writeFigure(rd *render.Renderer, f figure.Figure, path string) error {
+	png, err := rd.Render(f.Option, f.Width, f.Height)
+	if err != nil {
+		return fmt.Errorf("%s: %w", f.Path, err)
+	}
+	return os.WriteFile(path, png, 0o644)
 }
