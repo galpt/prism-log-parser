@@ -43,43 +43,100 @@ func scenarioStart(p *parser, line string) (stateFn, error) {
 	return scenarioBody, nil
 }
 
+// pendingHeader is a header row whose scheduler names are not known yet. The
+// names can only be told apart once the rows below the header give the column
+// count, so the line waits here, with its position for error messages.
+type pendingHeader struct {
+	line  int
+	text  string
+	split *headerSplit
+}
+
 // scenarioBody handles the header row, then the metric rows and the delta rows
-// up to the blank line that closes the table.
+// up to the blank line that closes the table. The header is resolved when the
+// first row arrives, or at the blank line if the table has no rows.
 func scenarioBody(p *parser, line string) (stateFn, error) {
 	sc := p.scenario()
-	switch {
-	case line == "" && sc.Schedulers == nil:
-		return nil, p.fail("scenario %s has no METRIC header", sc.Name)
-	case line == "":
+	if line == "" {
+		switch {
+		case p.head != nil:
+			return scenarioStart, p.resolveHeader(sc, -1)
+		case sc.Schedulers == nil:
+			return nil, p.fail("scenario %s has no METRIC header", sc.Name)
+		}
 		return scenarioStart, nil
-	case sc.Schedulers == nil:
-		return scenarioBody, p.header(sc, line)
+	}
+	if sc.Schedulers == nil && p.head == nil {
+		return scenarioBody, p.header(line)
+	}
+	if p.head != nil {
+		if err := p.firstRow(sc, line); err != nil {
+			return nil, err
+		}
 	}
 	return scenarioBody, p.tableRow(sc, line)
 }
 
-func (p *parser) header(sc *Scenario, line string) error {
-	label, names, err := decodeRow(line, -1)
-	if err != nil {
-		return p.fail("bad header row: %v", err)
-	}
+// header checks the METRIC label and keeps the rest of the line for later.
+func (p *parser) header(line string) error {
+	runes := []rune(line)
+	label := strings.TrimRight(string(runes[:min(labelWidth, len(runes))]), " ")
 	if label != "METRIC" {
 		return p.fail("expected the METRIC header row")
 	}
-	if len(names) == 0 {
+	rest := runes[min(labelWidth, len(runes)):]
+	if len(rest) == 0 {
 		return p.fail("header has no scheduler columns")
 	}
-	lower := map[string]bool{}
-	for _, n := range names {
-		// A name with a space is a "mean ±sd" measurement that the decoder
-		// joined, and a blank name is a gap, so neither is a scheduler.
-		if n == "" || strings.ContainsFunc(n, unicode.IsSpace) {
-			return p.fail("bad scheduler name %q in the header", n)
+	split, err := newHeaderSplit(rest)
+	if err != nil {
+		return p.fail("bad header row: %v", err)
+	}
+	if split.count(-1) == 0 {
+		return p.fail("bad header row: cannot split the header into scheduler columns")
+	}
+	p.head = &pendingHeader{line: p.line, text: p.text, split: split}
+	return nil
+}
+
+// firstRow settles the header with the column count of the first row. A delta
+// row can lose its blank trailing columns, so only a metric row is trusted to
+// give the count. After a delta row the header has to have one cut overall.
+func (p *parser) firstRow(sc *Scenario, line string) error {
+	label, cells, err := decodeRow(line, -1)
+	if err != nil {
+		return p.fail("bad row: %v", err)
+	}
+	n := len(cells)
+	if rest, ok := strings.CutPrefix(label, deltaPrefix); ok && rest != "" {
+		n = -1
+	}
+	return p.resolveHeader(sc, n)
+}
+
+// resolveHeader picks the cut of the pending header with n scheduler columns,
+// or the only cut when n is negative, and refuses a cut that is not unique.
+func (p *parser) resolveHeader(sc *Scenario, n int) error {
+	h := p.head
+	p.head = nil
+	what := "scheduler columns"
+	if n >= 0 {
+		what = fmt.Sprintf("%d scheduler columns", n)
+	}
+	switch h.split.count(n) {
+	case 0:
+		return p.failAt(h.line, h.text, "cannot split the header into %s", what)
+	case 1:
+	default:
+		return p.failAt(h.line, h.text, "the header splits into %s in more than one way", what)
+	}
+	names := h.split.names(n)
+	seen := map[string]bool{}
+	for _, name := range names {
+		if seen[strings.ToLower(name)] {
+			return p.failAt(h.line, h.text, "scheduler %s appears twice in the header", name)
 		}
-		if lower[strings.ToLower(n)] {
-			return p.fail("scheduler %s appears twice in the header", n)
-		}
-		lower[strings.ToLower(n)] = true
+		seen[strings.ToLower(name)] = true
 	}
 	sc.Schedulers = names
 	return nil

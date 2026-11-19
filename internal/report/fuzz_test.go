@@ -15,6 +15,8 @@ func FuzzParse(f *testing.F) {
 	full := fullLog()
 	f.Add(full)
 	f.Add(strings.ReplaceAll(full, "\n", "\r\n"))
+	f.Add(synthLog(spacedNames, []string{"alpha (bpf) -- crashed"}, spacedPopulation))
+	f.Add(synthLog([]string{"EEVDF", "PANDEMONIUM (BPF)", "PANDEMONIUM (ADAPTIVE)", "scx_panda", "scx_flow"}, nil, ""))
 	f.Add("")
 	f.Add("PANDEMONIUM PRISM-FRAME\n")
 	f.Add(full[:strings.Index(full, "SCENARIO BETA")])
@@ -35,6 +37,11 @@ func FuzzParse(f *testing.F) {
 		for _, sc := range r.Scenarios {
 			if len(sc.Schedulers) == 0 {
 				t.Fatalf("scenario %s has no schedulers", sc.Name)
+			}
+			for _, name := range sc.Schedulers {
+				if name == "" || name != strings.Trim(name, " ") {
+					t.Fatalf("scenario %s has the scheduler name %q", sc.Name, name)
+				}
 			}
 			for _, row := range sc.Rows {
 				if len(row.Cells) != len(sc.Schedulers) {

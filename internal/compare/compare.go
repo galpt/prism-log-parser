@@ -99,11 +99,18 @@ func schedulers(r *report.Report) []string {
 // A name that only one log has is used as it is. Otherwise the log's timestamp
 // is added, so the same scheduler in two runs reads "EEVDF (20260101-120000)".
 // Passing one log twice still leaves two equal labels, and those get " #k"
-// with k the 1-based position of the log. The labels are unique by
-// construction: a plain name has no space (the parser refuses one that does),
-// a stamped label has " (" and no "#", and a numbered label is the stamped
-// one plus the log position, which differs between two columns that would
-// otherwise collide because a log never lists a scheduler twice.
+// with k the 1-based position of the log.
+//
+// A scheduler name can hold spaces, parentheses and digits, so a plain name can
+// look exactly like a stamped or numbered label of another column, and those
+// three rules alone can not promise distinct labels. The last pass does. It
+// visits the columns in order and keeps the set of every label handed out so
+// far. A column whose label is in the set gets " #k" after it, and if that is
+// taken too, "-2", "-3" and so on after the number. The candidates for one
+// column are pairwise different strings and the set is finite, so one of them
+// is free and the search ends. Each label enters the set only after it was
+// found absent, so no two columns end up with the same label. When the first
+// rules already gave every column its own label, this pass changes nothing.
 func (s *Set) buildColumns(reports []*report.Report) []logColumns {
 	logs := make([]logColumns, len(reports))
 	holders := map[string]int{}
@@ -131,7 +138,30 @@ func (s *Set) buildColumns(reports []*report.Report) []logColumns {
 			c.Label += " #" + strconv.Itoa(c.Log+1)
 		}
 	}
+	taken := map[string]bool{}
+	for i := range s.columns {
+		c := &s.columns[i]
+		c.Label = freeLabel(taken, c.Label, c.Log+1)
+		taken[c.Label] = true
+	}
 	return logs
+}
+
+// freeLabel returns label if no earlier column has it. Otherwise it returns the
+// first of "label #k", "label #k-2", "label #k-3" and so on that is free.
+func freeLabel(taken map[string]bool, label string, k int) string {
+	if !taken[label] {
+		return label
+	}
+	numbered := label + " #" + strconv.Itoa(k)
+	if !taken[numbered] {
+		return numbered
+	}
+	for n := 2; ; n++ {
+		if candidate := numbered + "-" + strconv.Itoa(n); !taken[candidate] {
+			return candidate
+		}
+	}
 }
 
 // differences compares the preamble fields that make two runs incomparable.

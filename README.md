@@ -51,7 +51,7 @@ The charts of a run share a directory so that the whole set is easy to zip and s
 
 ## Combining logs
 
-When several logs are given, they are drawn side by side in the same images. Each scheduler of each log becomes its own bar column, so the same scheduler measured in two logs stays two columns. A scheduler that appears in more than one log gets the TIMESTAMP of its log added to the label, for example `EEVDF (20260101-120000)`, and a scheduler that only one log has keeps its plain name. Passing the same log twice gives equal labels, and those get ` #1`, ` #2` and so on after them. A dashed line separates the columns of two logs.
+When several logs are given, they are drawn side by side in the same images. Each scheduler of each log becomes its own bar column, so the same scheduler measured in two logs stays two columns. A scheduler that appears in more than one log gets the TIMESTAMP of its log added to the label, for example `EEVDF (20260101-120000)`, and a scheduler that only one log has keeps its plain name. Passing the same log twice gives equal labels, and those get ` #1`, ` #2` and so on after them. Scheduler names may contain spaces, so a name can look like another column's label, for example `EEVDF (20260101-120000)`. A label that is still taken after that gets ` #k` with the position of its log, and then `-2`, `-3` and so on after the number. A dashed line separates the columns of two logs.
 
 Images grow wider with the number of columns. A column has the same color and pattern in every image. If the logs differ in VERSION, COMMIT, CPUS or ITERATIONS, the captions say so, since those runs are not strictly comparable.
 

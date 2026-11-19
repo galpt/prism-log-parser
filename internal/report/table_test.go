@@ -50,17 +50,6 @@ func randomDelta(rng *rand.Rand) string {
 	return fmt.Sprintf("%+.1f%%", pct)
 }
 
-func randomName(rng *rand.Rand) string {
-	const alphabet = "abcdefghijklmnopqrstuvwxyz_0123456789éß"
-	runes := []rune(alphabet)
-	n := 1 + rng.Intn(40)
-	name := make([]rune, n)
-	for i := range name {
-		name[i] = runes[rng.Intn(len(runes))]
-	}
-	return string(name)
-}
-
 func randomLabel(rng *rand.Rand) string {
 	switch rng.Intn(3) {
 	case 0:
@@ -122,17 +111,95 @@ func TestDecodeRowEveryWidth(t *testing.T) {
 	}
 }
 
-func TestDecodeHeaderRoundTrip(t *testing.T) {
+// spacedName returns a scheduler name of 1 to 30 characters that may hold
+// inner spaces, runs of them, parentheses and digits, but never a leading or
+// trailing space, as the writer's callers promise.
+func spacedName(rng *rand.Rand) string {
+	runes := []rune("abcxyz_0129()#é      ")
+	name := make([]rune, 1+rng.Intn(30))
+	for i := range name {
+		name[i] = runes[rng.Intn(len(runes))]
+	}
+	trimmed := strings.Trim(string(name), " ")
+	if trimmed == "" {
+		return "x"
+	}
+	return trimmed
+}
+
+// headerRest is what newHeaderSplit sees: the header line without its label.
+func headerRest(names []string) []rune {
+	return []rune(tableRow("METRIC", names...))[labelWidth:]
+}
+
+// TestHeaderSplitRoundTrip checks that the split inverts the writer. The
+// printed names are always one of the cuts. When the line has no other cut for
+// that many columns the split must return exactly the printed names, and when
+// it has another one the split must say so instead of choosing. The names have
+// lengths on both sides of the 20 character column, so overflowing fields and
+// merged neighbors both occur.
+func TestHeaderSplitRoundTrip(t *testing.T) {
 	rng := rand.New(rand.NewSource(7))
-	for i := 0; i < 2000; i++ {
-		names := make([]string, 1+rng.Intn(8))
+	unique, ambiguous := 0, 0
+	for i := 0; i < 20000; i++ {
+		names := make([]string, 1+rng.Intn(6))
 		for j := range names {
-			names[j] = randomName(rng)
+			names[j] = spacedName(rng)
 		}
-		label, got, err := decodeRow(tableRow("METRIC", names...), -1)
-		if err != nil || label != "METRIC" || !slices.Equal(got, names) {
-			t.Fatalf("header %q: got %q %q, %v", names, label, got, err)
+		h, err := newHeaderSplit(headerRest(names))
+		if err != nil {
+			t.Fatal(err)
 		}
+		switch h.count(len(names)) {
+		case 0:
+			t.Fatalf("names %q: the printed cut was not found", names)
+		case 1:
+			unique++
+			if got := h.names(len(names)); !slices.Equal(got, names) {
+				t.Fatalf("names %q: split into %q", names, got)
+			}
+		default:
+			ambiguous++
+		}
+	}
+	if unique == 0 || ambiguous == 0 {
+		t.Errorf("the random headers had %d unique and %d ambiguous splits, want both", unique, ambiguous)
+	}
+}
+
+// TestHeaderSplitThroughParse runs the same round trip through the parser,
+// where the first row gives the column count. An ambiguous header has to come
+// back as an error that points at the header line.
+func TestHeaderSplitThroughParse(t *testing.T) {
+	rng := rand.New(rand.NewSource(11))
+	unique, ambiguous := 0, 0
+	for i := 0; i < 3000; i++ {
+		var names []string
+		seen := map[string]bool{}
+		for n := 1 + rng.Intn(6); len(names) < n; {
+			if name := spacedName(rng); !seen[strings.ToLower(name)] {
+				seen[strings.ToLower(name)] = true
+				names = append(names, name)
+			}
+		}
+		text := synthLog(names, nil, "")
+		h, _ := newHeaderSplit(headerRest(names))
+		r, err := Parse("synth.log", strings.NewReader(text))
+		if h.count(len(names)) == 1 {
+			unique++
+			if err != nil || !slices.Equal(r.Scenarios[0].Schedulers, names) {
+				t.Fatalf("names %q: got %v, %v", names, r, err)
+			}
+			continue
+		}
+		ambiguous++
+		if err == nil || !strings.Contains(err.Error(), "synth.log:"+headerLineNumber+": ") ||
+			!strings.Contains(err.Error(), "in more than one way") {
+			t.Fatalf("names %q: want an ambiguity error at the header, got %v", names, err)
+		}
+	}
+	if unique == 0 || ambiguous == 0 {
+		t.Errorf("the random headers had %d unique and %d ambiguous splits, want both", unique, ambiguous)
 	}
 }
 

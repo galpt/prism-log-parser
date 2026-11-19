@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"unicode"
 )
 
 // maxLine bounds one log line. The widest real line is a table row, a few
@@ -41,6 +40,12 @@ type parser struct {
 	stage int
 	// seen holds the labels of the current scenario, to refuse a repeated row.
 	seen map[string]bool
+	// head is the header row of the current scenario while its scheduler names
+	// are still unresolved.
+	head *pendingHeader
+	// known holds the lowercase scheduler names of the tables, longest first,
+	// for reading the POPULATION lines.
+	known []string
 	// footerSeen and inPopulation record how far the file got, for the checks
 	// that run at the end of input.
 	footerSeen   bool
@@ -92,7 +97,13 @@ func ParseFile(path string) (*Report, error) {
 
 // fail builds an error for the current line.
 func (p *parser) fail(format string, args ...any) error {
-	return fmt.Errorf("%s:%d: %s: %q", p.name, p.line, fmt.Sprintf(format, args...), p.text)
+	return p.failAt(p.line, p.text, format, args...)
+}
+
+// failAt builds an error for an earlier line, such as a header that could only
+// be checked once the rows below it were read.
+func (p *parser) failAt(line int, text, format string, args ...any) error {
+	return fmt.Errorf("%s:%d: %s: %q", p.name, line, fmt.Sprintf(format, args...), text)
 }
 
 // finish checks what only the end of the input can tell. The reported line is
@@ -211,7 +222,8 @@ func setCalibration(m *Meta, v string) error {
 }
 
 // footer handles the lines after the last table. The AUDIO and SKIPPED lines
-// are optional and a blank line moves on to the population section.
+// are optional and a blank line moves on to the population section. A scheduler
+// name can hold spaces, so a SKIPPED line is cut at its first " -- ".
 func footer(p *parser, line string) (stateFn, error) {
 	if line == "" {
 		return populationHeader, nil
@@ -223,7 +235,7 @@ func footer(p *parser, line string) (stateFn, error) {
 	if rest, ok := strings.CutPrefix(line, "SKIPPED: "); ok {
 		sched, reason, found := strings.Cut(rest, " -- ")
 		sched, reason = strings.TrimSpace(sched), strings.TrimSpace(reason)
-		if !found || sched == "" || strings.ContainsFunc(sched, unicode.IsSpace) || reason == "" {
+		if !found || sched == "" || reason == "" {
 			return nil, p.fail("expected SKIPPED: <scheduler> -- <reason>")
 		}
 		p.rep.Skipped = append(p.rep.Skipped, Skip{Scheduler: sched, Reason: reason})

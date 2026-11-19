@@ -123,6 +123,124 @@ func TestColumnLabels(t *testing.T) {
 	}
 }
 
+// TestColumnLabelsAdversarialNames covers names that look like the labels the
+// rules build. Each case has a collision that " #k" alone does not resolve, or
+// a scheduler whose plain name equals a stamped label.
+func TestColumnLabelsAdversarialNames(t *testing.T) {
+	heavy := func(names ...string) report.Scenario { return scenario("HEAVY", names) }
+	const t1, t2 = "20260101-120000", "20260101-130000"
+	cases := []struct {
+		name    string
+		reports []*report.Report
+		want    []string
+	}{
+		{
+			"a plain name equal to a stamped label",
+			[]*report.Report{
+				logOf("a", t1, heavy("EEVDF ("+t1+")")),
+				logOf("b", t1, heavy("EEVDF")),
+				logOf("c", t1, heavy("EEVDF")),
+			},
+			[]string{"EEVDF (" + t1 + ") #1", "EEVDF (" + t1 + ") #2", "EEVDF (" + t1 + ") #3"},
+		},
+		{
+			"two columns of one log that are equal after numbering",
+			[]*report.Report{
+				logOf("a", t1, heavy("EEVDF", "EEVDF ("+t1+")")),
+				logOf("b", t2, heavy("EEVDF")),
+			},
+			[]string{"EEVDF (" + t1 + ") #1", "EEVDF (" + t1 + ") #1 #1", "EEVDF (" + t2 + ")"},
+		},
+		{
+			"a name equal to a label that was already numbered",
+			[]*report.Report{
+				logOf("a", t1, heavy("x", "x #1", "x #1 #1")),
+				logOf("b", t2, heavy("x")),
+			},
+			[]string{"x (" + t1 + ")", "x #1", "x #1 #1", "x (" + t2 + ")"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := labels(mustNew(t, c.reports...)); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("labels = %q\nwant     %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestFreeLabel(t *testing.T) {
+	taken := map[string]bool{"a": true, "a #1": true, "a #1-2": true, "b": true}
+	cases := []struct {
+		label string
+		k     int
+		want  string
+	}{
+		{"c", 1, "c"},
+		{"b", 1, "b #1"},
+		{"b", 3, "b #3"},
+		{"a", 1, "a #1-3"},
+		{"a", 2, "a #2"},
+	}
+	for _, c := range cases {
+		if got := freeLabel(taken, c.label, c.k); got != c.want {
+			t.Errorf("freeLabel(%q, %d) = %q, want %q", c.label, c.k, got, c.want)
+		}
+	}
+}
+
+// randomLabelName builds a scheduler name from fragments that appear in the
+// labels the rules build, so that names collide with other columns' labels.
+func randomLabelName(rng *rand.Rand, stamps []string) string {
+	fragments := []string{"EEVDF", "x", " ", "  ", "(", ")", "#", "1", "2", "-2", " #1", " #2", " (" + stamps[0] + ")", " (" + stamps[1] + ")"}
+	var b strings.Builder
+	for n := 1 + rng.Intn(4); n > 0; n-- {
+		b.WriteString(fragments[rng.Intn(len(fragments))])
+	}
+	return b.String()
+}
+
+// TestColumnLabelsAreUniqueForAnyNames is TestColumnLabelsAreUnique with names
+// made of spaces, parentheses, "#" and digits, which can imitate stamped and
+// numbered labels.
+func TestColumnLabelsAreUniqueForAnyNames(t *testing.T) {
+	rng := rand.New(rand.NewSource(4321))
+	stamps := []string{"20260101-000001", "20260101-000002"}
+	pool := []string{"EEVDF", "EEVDF (" + stamps[0] + ")", "EEVDF #1", "EEVDF (" + stamps[1] + ") #2"}
+	for i := 0; i < 5000; i++ {
+		names := append([]string(nil), pool...)
+		for n := rng.Intn(4); n > 0; n-- {
+			names = append(names, randomLabelName(rng, stamps))
+		}
+		var reports []*report.Report
+		for l := rng.Intn(5) + 1; l > 0; l-- {
+			var own []string
+			seen := map[string]bool{}
+			for _, n := range names {
+				if !seen[n] && rng.Intn(2) == 0 {
+					seen[n] = true
+					own = append(own, n)
+				}
+			}
+			if len(own) == 0 {
+				own = names[:1]
+			}
+			reports = append(reports, logOf("log", stamps[rng.Intn(len(stamps))], scenario("HEAVY", own)))
+		}
+		s := mustNew(t, reports...)
+		seen := map[string]bool{}
+		for _, c := range s.Columns() {
+			if seen[c.Label] {
+				t.Fatalf("label %q is not unique in %q", c.Label, labels(s))
+			}
+			seen[c.Label] = true
+			if c.Log >= len(reports) || !strings.HasPrefix(c.Label, c.Scheduler) {
+				t.Fatalf("column %+v does not belong to its log", c)
+			}
+		}
+	}
+}
+
 // TestColumnLabelsAreUnique draws many random sets of logs, with small pools of
 // names and timestamps so that collisions are common, and checks that every
 // label is distinct and every column keeps its own log and scheduler.
