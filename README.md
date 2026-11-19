@@ -1,8 +1,6 @@
 # prism-log-parser
 
-`prism-parser` turns the benchmark logs of [PANDEMONIUM](https://github.com/wllclngn/PANDEMONIUM) into PNG charts.
-
-PANDEMONIUM is a `sched_ext` CPU scheduler project. Its frame benchmark, `prism --dev frame`, writes a text report to `~/.cache/pandemonium/prism-frame-<timestamp>.log`. The report has a preamble, one table per scenario, some footer notes and, when [montauk](https://github.com/wllclngn/montauk) was available, a POPULATION section with its statistics.
+`prism-parser` turns the benchmark logs of [PANDEMONIUM](https://github.com/wllclngn/PANDEMONIUM) into PNG charts. PANDEMONIUM is a `sched_ext` CPU scheduler project, and its frame benchmark, `prism --dev frame`, writes a text report to `~/.cache/pandemonium/prism-frame-<timestamp>.log`. The report has a preamble, one table per scenario, some footer notes and, when [montauk](https://github.com/wllclngn/montauk) was available, a POPULATION section with its statistics.
 
 The parser draws one image per metric of every scenario and a few summary images, in the style of the figures of a paper. It is strict. A line it does not understand is an error, since a skipped row would put a wrong number in a chart.
 
@@ -83,7 +81,7 @@ All logs are parsed before anything is created, so a failure leaves no directory
 
 ### Combining logs
 
-When several logs are given, they are drawn side by side in the same images, in the order given. Each scheduler of each log becomes its own bar column, so the same scheduler measured in two logs stays two columns. A dashed line separates the columns of two logs, and a column has the same color and pattern in every image.
+When several logs are given, they are drawn side by side in the same images, in the order given. Each scheduler of each log becomes its own bar column, so the same scheduler measured in two logs stays two columns. A dashed line separates the columns of two logs, and a column has the same color and pattern in every image. If the logs differ in VERSION, COMMIT, CPUS or ITERATIONS, the captions say so, since those runs are not strictly comparable.
 
 The labels of the columns are made by these rules, which apply in this order:
 
@@ -93,8 +91,6 @@ The labels of the columns are made by these rules, which apply in this order:
 | The scheduler is in several logs | ` (TIMESTAMP)` of its log, as in `EEVDF (20260101-120000)` |
 | Two columns still share a label, as when one log is given twice | ` #k`, with k the position of the log |
 | A name looks like another column's label | ` #k`, then `-2`, `-3` and so on until free |
-
-If the logs differ in VERSION, COMMIT, CPUS or ITERATIONS, the captions say so, since those runs are not strictly comparable.
 
 ## What the images show
 
