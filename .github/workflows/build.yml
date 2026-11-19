@@ -1,0 +1,184 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+jobs:
+  # Bumps the patch version on each push to main. The tag is pushed with
+  # GITHUB_TOKEN, which does not start another workflow run, so this run is
+  # the only one that builds and releases it.
+  auto-tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: >
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    outputs:
+      new_tag: ${{ steps.tag.outputs.new_tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Get latest tag
+        id: get_tag
+        run: |
+          git fetch --tags
+          LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
+          echo "latest_tag=$LATEST" >> "$GITHUB_OUTPUT"
+
+      - name: Increment patch version
+        id: tag
+        run: |
+          LATEST=${{ steps.get_tag.outputs.latest_tag }}
+          VERSION=${LATEST#v}
+          IFS='.' read -ra PARTS <<< "$VERSION"
+          MAJOR=${PARTS[0]:-1}
+          MINOR=${PARTS[1]:-0}
+          PATCH=${PARTS[2]:-0}
+          # Enforce minimum major version of 1.
+          if [ "$MAJOR" -lt 1 ]; then
+            MAJOR=1
+            MINOR=0
+            PATCH=0
+          fi
+          PATCH=$((PATCH + 1))
+          NEW="v$MAJOR.$MINOR.$PATCH"
+          echo "new_tag=$NEW" >> "$GITHUB_OUTPUT"
+          echo "New tag: $NEW"
+
+      - name: Push tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag ${{ steps.tag.outputs.new_tag }}
+          git push origin ${{ steps.tag.outputs.new_tag }}
+
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: 0
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+      - name: Run vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test ./...
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [ auto-tag, test ]
+    if: >
+      always() &&
+      needs.test.result == 'success' &&
+      (needs.auto-tag.result == 'success' || startsWith(github.ref, 'refs/tags/v'))
+    strategy:
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64, name: linux-amd64 }
+          - { goos: linux,   goarch: arm64, name: linux-arm64 }
+          - { goos: linux,   goarch: arm,   goarm: 7, name: linux-armv7 }
+          - { goos: linux,   goarch: arm,   goarm: 6, name: linux-armv6 }
+          - { goos: linux,   goarch: 386,   name: linux-386 }
+          - { goos: windows, goarch: amd64, name: windows-amd64, ext: .exe }
+          - { goos: windows, goarch: arm64, name: windows-arm64, ext: .exe }
+          - { goos: darwin,  goarch: amd64, name: darwin-amd64 }
+          - { goos: darwin,  goarch: arm64, name: darwin-arm64 }
+          - { goos: freebsd, goarch: amd64, name: freebsd-amd64 }
+          - { goos: freebsd, goarch: arm64, name: freebsd-arm64 }
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          GOOS:        ${{ matrix.goos }}
+          GOARCH:      ${{ matrix.goarch }}
+          GOARM:       ${{ matrix.goarm }}
+          CGO_ENABLED: 0
+          VERSION:     ${{ needs.auto-tag.outputs.new_tag || github.ref_name }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+            -o "dist/prism-parser${{ matrix.ext }}" ./cmd/prism-parser
+
+      - name: Archive
+        run: |
+          mkdir -p stage
+          cp "dist/prism-parser${{ matrix.ext }}" LICENSE README.md \
+            internal/render/assets/LICENSE-echarts \
+            internal/render/assets/NOTICE-echarts \
+            internal/render/assets/LICENSE-liberation stage/
+          cd stage
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip "../dist/prism-parser-${{ matrix.name }}.zip" ./*
+          else
+            tar -czf "../dist/prism-parser-${{ matrix.name }}.tar.gz" ./*
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: prism-parser-${{ matrix.name }}
+          path: dist/prism-parser-${{ matrix.name }}.*
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [ auto-tag, build ]
+    permissions:
+      contents: write
+    if: >
+      always() &&
+      needs.build.result == 'success' &&
+      (needs.auto-tag.result == 'success' || startsWith(github.ref, 'refs/tags/v'))
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Collect release assets
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) \
+            -exec cp {} release/ \;
+          cd release
+          sha256sum -- *.tar.gz *.zip > SHA256SUMS
+          ls -lh
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.auto-tag.outputs.new_tag || github.ref_name }}
+          files: release/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
