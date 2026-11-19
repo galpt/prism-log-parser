@@ -226,3 +226,20 @@ func TestErrorBarOnSecondGridWithLogAxis(t *testing.T) {
 		}
 	}
 }
+
+func TestTextWidth(t *testing.T) {
+	text := "FRAME TIME p99 (ms)"
+	regular := shared.TextWidth(text, 12, false)
+	if want := shared.measure.width(text, "12px sans-serif"); regular != want {
+		t.Errorf("TextWidth = %v, want the measurer's %v", regular, want)
+	}
+	if bold := shared.TextWidth(text, 12, true); bold <= regular {
+		t.Errorf("bold width %v is not wider than regular %v", bold, regular)
+	}
+	if double := shared.TextWidth(text, 24, false); math.Abs(double-2*regular) > 0.01*double {
+		t.Errorf("24px width %v is not twice the 12px width %v", double, regular)
+	}
+	if w := shared.TextWidth(text, 12.5, false); w <= regular {
+		t.Errorf("12.5px width %v is not wider than 12px width %v", w, regular)
+	}
+}

@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/dop251/goja v0.0.0-20261118204651-8dfece3d1e1d
+	github.com/go-echarts/go-echarts/v2 v2.7.3
 	github.com/kanrichan/resvg-go v0.0.2-0.20260124063605-1b2ace355216
 	golang.org/x/image v0.48.0
 )

@@ -49,6 +49,7 @@ type Renderer struct {
 	renderSVG goja.Callable
 	worker    *resvg.Worker
 	fonts     *resvg.FontDB
+	measure   *measurer
 }
 
 // New loads ECharts into a fresh goja runtime and starts the resvg worker.
@@ -88,7 +89,7 @@ func New() (*Renderer, error) {
 		_ = worker.Close()
 		return nil, err
 	}
-	return &Renderer{vm: vm, renderSVG: renderSVG, worker: worker, fonts: fonts}, nil
+	return &Renderer{vm: vm, renderSVG: renderSVG, worker: worker, fonts: fonts, measure: m}, nil
 }
 
 // newFontDB builds the font database that every render shares. It holds only
@@ -170,6 +171,18 @@ func (r *Renderer) rasterize(svg string, width, height int) ([]byte, error) {
 		return nil, fmt.Errorf("encode png: %w", err)
 	}
 	return png, nil
+}
+
+// TextWidth returns the advance in px of text set in the embedded font at
+// sizePx, which is the width ECharts lays the same text out with. A caller
+// that sizes a chart around its labels gets the numbers the render will use.
+func (r *Renderer) TextWidth(text string, sizePx float64, bold bool) float64 {
+	// A size that is not positive gets the default size, as it does in a
+	// font string.
+	if !(sizePx > 0) {
+		sizePx = defaultFontSize
+	}
+	return r.measure.advance(text, faceKey{bold: bold, size: sizePx})
 }
 
 // Close releases the resvg worker and its wasm memory. The Renderer must not

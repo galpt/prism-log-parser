@@ -55,10 +55,14 @@ func newMeasurer() (*measurer, error) {
 }
 
 // width returns the advance of text in px for a CSS font shorthand string.
-// A face that cannot be built measures as zero width, which makes ECharts
-// lay the text out as empty instead of failing the whole render.
 func (m *measurer) width(text, spec string) float64 {
-	key := parseFont(spec)
+	return m.advance(text, parseFont(spec))
+}
+
+// advance returns the advance of text in px in the face that key names. A
+// face that cannot be built measures as zero width, which makes ECharts
+// lay the text out as empty instead of failing the whole render.
+func (m *measurer) advance(text string, key faceKey) float64 {
 	face, ok := m.faces[key]
 	if !ok {
 		f := m.regular
